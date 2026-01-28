@@ -4,4 +4,4 @@ print(f"计算能力: {torch.cuda.get_device_capability(0)}") # 5090 D 应显示
 print(f"测试张量运算: {torch.randn(10, 10).cuda() @ torch.randn(10, 10).cuda()}")
 
 # pip uninstall torch torchvision torchaudio -y
-# pip install torch==2.7.0.dev20250226 torchvision==0.22.0.dev20250226 --index-url https://download.pytorch.org/whl/nightly/cu124
+# pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
