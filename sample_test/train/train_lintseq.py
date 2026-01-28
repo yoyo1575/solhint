@@ -3,7 +3,7 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments, 
+    TrainingArguments,
 )
 from peft import LoraConfig, TaskType
 from trl import SFTTrainer
@@ -18,7 +18,8 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         self.response_token_ids = self.tokenizer.encode(self.response_template, add_special_tokens=False)
 
     def torch_call(self, examples):
-        batch = super().__init__.torch_call(examples) if hasattr(super(), 'torch_call') else super().__call__(examples)
+        # 兼容旧版本调用方式
+        batch = super().torch_call(examples)
         labels = batch["labels"].clone()
         for i in range(len(examples)):
             response_token_ids_start_idx = None
@@ -46,15 +47,12 @@ LEARNING_RATE = 2e-4
 NUM_EPOCHS = 3
 
 def main():
-    # 1. 加载数据集
     dataset = load_dataset("json", data_files=DATA_PATH, split="train")
-    
-    # 2. 加载分词器
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right" # 训练时建议右填充
+    # 强制设置 padding_side
+    tokenizer.padding_side = "right"
 
-    # 3. 定义 Prompt 格式化函数
     def formatting_prompts_func(example):
         output_texts = []
         for i in range(len(example['instruction'])):
@@ -63,51 +61,48 @@ def main():
             output = example['output'][i]
             user_content = f"{instruction}\n\nInput:\n{input_text}" if input_text.strip() else instruction
             messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": output}]
-            text = tokenizer.apply_chat_template(messages, tokenize=False)
+            # 使用 apply_chat_template 生成最终文本
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
             output_texts.append(text)
         return output_texts
 
-    # 4. 加载模型 (针对 5090 D 优化)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.bfloat16, # 5090 D 必用 bf16
-        attn_implementation="sdpa", # 5090 D 硬件原生支持
+        # 注意：图片提示 torch_dtype 已过时，改用 dtype
+        dtype=torch.bfloat16, 
+        attn_implementation="sdpa",
         device_map="auto",
         trust_remote_code=True
     )
 
-    # 5. LoRA 配置
     peft_config = LoraConfig(
-        r=64, 
-        lora_alpha=128, 
-        lora_dropout=0.05, 
-        bias="none",
+        r=64, lora_alpha=128, lora_dropout=0.05, bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    # 6. 训练参数配置
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUMULATION,
         learning_rate=LEARNING_RATE,
         num_train_epochs=NUM_EPOCHS,
-        bf16=True, # 确保开启混合精度
+        bf16=True,
         logging_steps=10,
         save_strategy="steps",
         save_steps=500,
         optim="adamw_torch",
-        gradient_checkpointing=True, # 节省显存
+        gradient_checkpointing=True,
         report_to="none",
+        # 显式关闭某些可能导致冲突的设置
+        remove_unused_columns=False 
     )
 
-    # 7. 数据整理器
-    # 这里的 tokenizer 会被传进 collator，所以 Trainer 不需要再传一遍
+    # 这里的 tokenizer 已经传给 collator 了
     collator = DataCollatorForCompletionOnlyLM("<|im_start|>assistant\n", tokenizer=tokenizer)
 
-    # 8. 初始化 SFTTrainer
-    # 修正：去掉了导致报错的 tokenizer=tokenizer 参数
+    # 关键修改：针对 0.8.6 版本，移除 SFTTrainer 括号内的 tokenizer 参数
+    # 因为自定义 collator 内部已有 tokenizer，重复传递会导致 Trainer 初始化异常
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
@@ -115,17 +110,15 @@ def main():
         formatting_func=formatting_prompts_func,
         data_collator=collator,
         args=training_args,
-        max_seq_length=MAX_SEQ_LENGTH, # max_seq_length 放在这里
+        max_seq_length=MAX_SEQ_LENGTH,
     )
 
-    # 9. 开始训练
-    print("Environment check passed. Starting training on RTX 5090 D...")
+    print("Starting training on RTX 5090 D...")
     trainer.train()
     
-    # 10. 保存
     trainer.model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
 if __name__ == "__main__":
     main()
-    #3
+    #5
