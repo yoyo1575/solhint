@@ -6,7 +6,47 @@ from transformers import (
     TrainingArguments,
 )
 from peft import LoraConfig, TaskType
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer
+from transformers import DataCollatorForLanguageModeling
+
+import numpy as np
+
+
+class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
+    def __init__(self, response_template, tokenizer, mlm=False):
+        super().__init__(tokenizer=tokenizer, mlm=mlm)
+        self.response_template = response_template
+        self.response_token_ids = self.tokenizer.encode(self.response_template, add_special_tokens=False)
+
+    def torch_call(self, examples):
+        batch = super().torch_call(examples)
+        labels = batch["labels"].clone()
+
+        for i in range(len(examples)):
+            # 找到 response_template 在 labels 里的位置
+            response_token_ids_start_idx = None
+
+            # 简单的查找算法
+            for idx in range(len(labels[i]) - len(self.response_token_ids)):
+                if np.all(labels[i][idx: idx + len(self.response_token_ids)].cpu().numpy() == self.response_token_ids):
+                    response_token_ids_start_idx = idx
+                    break
+
+            if response_token_ids_start_idx is None:
+                # 如果没找到分隔符，说明这条数据有问题，或者被截断了
+                # 为了不报错，我们忽略这条数据的 loss (全部设为 -100)
+                labels[i, :] = -100
+            else:
+                # 找到分隔符了，把分隔符之前（包括分隔符）的所有 token 的 label 设为 -100 (忽略 Loss)
+                response_start = response_token_ids_start_idx + len(self.response_token_ids)
+                labels[i, :response_start] = -100
+
+        batch["labels"] = labels
+        return batch
+
+
+
+
 
 MODEL_ID = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 
@@ -90,9 +130,9 @@ def main():
         logging_steps=100,  # 每10步打印一次日志
 
         save_strategy="steps",  # 每轮保存一次
-        sava_steps=1000,
-        sava_total_limit=3,
-        
+        save_steps=1000,
+        save_total_limit=3,
+
         optim="adamw_torch",
         report_to="none",  # 不上传 wandb
         gradient_checkpointing=True,  # 显存优化技术，开启后可以跑更大的 Batch
