@@ -4,13 +4,13 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
+    Trainer,  # 直接使用基类 Trainer 绕过 trl 的 Bug
 )
-from peft import LoraConfig, TaskType
-from trl import SFTTrainer
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import DataCollatorForLanguageModeling
 import numpy as np
 
-# 1. 路径配置
+# 1. 配置
 MODEL_ID = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 DATA_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/data/train_lintseq.jsonl"
 OUTPUT_DIR = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/lora/solidity_lintseq"
@@ -21,14 +21,14 @@ GRAD_ACCUMULATION = 2
 LEARNING_RATE = 2e-4
 NUM_EPOCHS = 3
 
-# 2. 自定义 DataCollator (保持不变)
+# 2. 数据整理器 (保持你的逻辑)
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(self, response_template, tokenizer, mlm=False):
         super().__init__(tokenizer=tokenizer, mlm=mlm)
         self.response_template = response_template
         self.response_token_ids = self.tokenizer.encode(self.response_template, add_special_tokens=False)
 
-    def torch_call(self, examples):
+    def __call__(self, examples):
         batch = super().__call__(examples)
         labels = batch["labels"].clone()
         for i in range(len(examples)):
@@ -51,36 +51,40 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    # 4. 手动预处理数据集（彻底解决 SFTTrainer 内部参数冲突的关键）
+    # 4. 手动预处理：将数据转化为输入 ID
     raw_dataset = load_dataset("json", data_files=DATA_PATH, split="train")
-    
-    def process_func(example):
+
+    def tokenize_function(example):
         instruction = example['instruction']
         input_text = example['input'] if example['input'] else ""
         output = example['output']
         user_content = f"{instruction}\n\nInput:\n{input_text}" if input_text.strip() else instruction
         messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": output}]
-        # 预先将聊天模板转换为文本
-        example["text"] = tokenizer.apply_chat_template(messages, tokenize=False)
-        return example
+        
+        # 应用模板并直接分词
+        text = tokenizer.apply_chat_template(messages, tokenize=False)
+        return tokenizer(text, truncation=True, max_length=MAX_SEQ_LENGTH)
 
-    dataset = raw_dataset.map(process_func, remove_columns=raw_dataset.column_names)
+    # 预处理数据并删除原始列
+    dataset = raw_dataset.map(tokenize_function, remove_columns=raw_dataset.column_names)
 
     # 5. 加载模型 (针对 5090 D 优化)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        dtype=torch.bfloat16, # 修正警告：使用 dtype 代替 torch_dtype
-        attn_implementation="sdpa", # 5090 D 支持
+        dtype=torch.bfloat16,  # 解决过时警告
+        attn_implementation="sdpa",
         device_map="auto",
         trust_remote_code=True
     )
 
-    # 6. 配置 LoRA
+    # 6. 配置 LoRA 并应用到模型
     peft_config = LoraConfig(
         r=64, lora_alpha=128, lora_dropout=0.05, bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
 
     # 7. 训练参数
     training_args = TrainingArguments(
@@ -89,7 +93,7 @@ def main():
         gradient_accumulation_steps=GRAD_ACCUMULATION,
         learning_rate=LEARNING_RATE,
         num_train_epochs=NUM_EPOCHS,
-        bf16=True, # 5090 D 必开
+        bf16=True, # 5090 D 核心优势
         logging_steps=10,
         save_strategy="steps",
         save_steps=500,
@@ -98,27 +102,23 @@ def main():
         report_to="none",
     )
 
+    # 8. 初始化原始 Trainer (彻底避开 tokenizer 报错)
     collator = DataCollatorForCompletionOnlyLM("<|im_start|>assistant\n", tokenizer=tokenizer)
 
-    # 8. 初始化 SFTTrainer (极简模式)
-    # 不再传入 formatting_func 和 tokenizer，直接使用预处理好的 "text" 列
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         train_dataset=dataset,
-        peft_config=peft_config,
-        dataset_text_field="text", # 指定文本列
         data_collator=collator,
         args=training_args,
-        max_seq_length=MAX_SEQ_LENGTH, # 直接传给 Trainer
     )
 
-    print("Starting training on RTX 5090 D...")
+    print("--- 5090 D 环境就绪，开始训练 ---")
     trainer.train()
     
-    # 9. 保存结果
-    trainer.model.save_pretrained(OUTPUT_DIR)
+    # 9. 保存
+    model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
 if __name__ == "__main__":
     main()
-    #6
+    #7
