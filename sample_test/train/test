@@ -5,3 +5,8 @@ print(f"测试张量运算: {torch.randn(10, 10).cuda() @ torch.randn(10, 10).cu
 
 # pip uninstall torch torchvision torchaudio -y
 # pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
+# 先安装核心引擎 torch (自动抓取今天最新的预览版)
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
+
+# 核心引擎装好后，再尝试补全 torchvision 和 torchaudio
+pip install --pre torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
