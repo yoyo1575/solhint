@@ -3,13 +3,13 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
 )
 from peft import LoraConfig, TaskType
 from trl import SFTTrainer, SFTConfig
 from transformers import DataCollatorForLanguageModeling
 import numpy as np
 
+# 自定义 DataCollator 保持不变
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(self, response_template, tokenizer, mlm=False):
         super().__init__(tokenizer=tokenizer, mlm=mlm)
@@ -19,23 +19,21 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def torch_call(self, examples):
         batch = super().torch_call(examples)
         labels = batch["labels"].clone()
-
         for i in range(len(examples)):
             response_token_ids_start_idx = None
             for idx in range(len(labels[i]) - len(self.response_token_ids)):
                 if np.all(labels[i][idx: idx + len(self.response_token_ids)].cpu().numpy() == self.response_token_ids):
                     response_token_ids_start_idx = idx
                     break
-
             if response_token_ids_start_idx is None:
                 labels[i, :] = -100
             else:
                 response_start = response_token_ids_start_idx + len(self.response_token_ids)
                 labels[i, :response_start] = -100
-
         batch["labels"] = labels
         return batch
 
+# 配置参数
 MODEL_ID = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 DATA_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/data/train_lintseq.jsonl"
 OUTPUT_DIR = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/lora/solidity_lintseq"
@@ -57,18 +55,10 @@ def main():
         output_texts = []
         for i in range(len(example['instruction'])):
             instruction = example['instruction'][i]
-            input_text = example['input'][i]
+            input_text = example['input'][i] if example['input'][i] else ""
             output = example['output'][i]
-
-            if input_text and len(input_text.strip()) > 0:
-                user_content = f"{instruction}\n\nInput:\n{input_text}"
-            else:
-                user_content = instruction
-
-            messages = [
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": output}
-            ]
+            user_content = f"{instruction}\n\nInput:\n{input_text}" if input_text.strip() else instruction
+            messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": output}]
             text = tokenizer.apply_chat_template(messages, tokenize=False)
             output_texts.append(text)
         return output_texts
@@ -77,7 +67,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation="sdpa", # 5090D 建议使用 sdpa 或 flash_attention_2
         device_map="auto",
         trust_remote_code=True
     )
@@ -91,7 +81,7 @@ def main():
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    # 修改点：从 SFTConfig 中移除 max_seq_length
+    # 在 dev 版本中，尽量精简 Config
     training_args = SFTConfig(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
@@ -99,15 +89,13 @@ def main():
         learning_rate=LEARNING_RATE,
         num_train_epochs=NUM_EPOCHS,
         bf16=True,
-        fp16=False,
-        logging_steps=100,
-        save_strategy="steps",
-        save_steps=1000,
-        save_total_limit=3,
+        logging_steps=10,
+        save_strategy="no", # 调试时建议先不保存
         optim="adamw_torch",
-        report_to="none",
         gradient_checkpointing=True,
-        dataloader_num_workers=4,
+        report_to="none",
+        # 如果 SFTConfig 还是报错，请注释掉下面这一行
+        max_seq_length=MAX_SEQ_LENGTH 
     )
 
     response_template = "<|im_start|>assistant\n"
@@ -120,13 +108,16 @@ def main():
         formatting_func=formatting_prompts_func,
         data_collator=collator,
         args=training_args,
+        # 在某些 trl 版本中，max_seq_length 必须在这里
         max_seq_length=MAX_SEQ_LENGTH,
+        dataset_kwargs={
+            "add_special_tokens": False,
+        }
     )
 
     print("Starting training")
     trainer.train()
 
-    print(f"Training finished. Saving model to {OUTPUT_DIR}")
     trainer.model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
