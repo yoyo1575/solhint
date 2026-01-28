@@ -1,0 +1,44 @@
+# ... 前面的 import ...
+from transformers import DataCollatorForLanguageModeling # 引入基础 Collator
+
+# =========== ✂️ 删除原来的 trl 导入 ✂️ ===========
+# from trl import DataCollatorForCompletionOnlyLM (删掉这行)
+# ===============================================
+
+# =========== ✨ 手写替代类 (直接粘贴进去) ✨ ===========
+import numpy as np
+
+class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
+    def __init__(self, response_template, tokenizer, mlm=False):
+        super().__init__(tokenizer=tokenizer, mlm=mlm)
+        self.response_template = response_template
+        self.response_token_ids = self.tokenizer.encode(self.response_template, add_special_tokens=False)
+
+    def torch_call(self, examples):
+        batch = super().torch_call(examples)
+        labels = batch["labels"].clone()
+
+        for i in range(len(examples)):
+            # 找到 response_template 在 labels 里的位置
+            response_token_ids_start_idx = None
+            
+            # 简单的查找算法
+            for idx in range(len(labels[i]) - len(self.response_token_ids)):
+                if np.all(labels[i][idx : idx + len(self.response_token_ids)].cpu().numpy() == self.response_token_ids):
+                    response_token_ids_start_idx = idx
+                    break
+
+            if response_token_ids_start_idx is None:
+                # 如果没找到分隔符，说明这条数据有问题，或者被截断了
+                # 为了不报错，我们忽略这条数据的 loss (全部设为 -100)
+                labels[i, :] = -100
+            else:
+                # 找到分隔符了，把分隔符之前（包括分隔符）的所有 token 的 label 设为 -100 (忽略 Loss)
+                response_start = response_token_ids_start_idx + len(self.response_token_ids)
+                labels[i, :response_start] = -100
+
+        batch["labels"] = labels
+        return batch
+# ====================================================
+
+# ... 后面是原来的 MODEL_ID, main() 等代码 ...
