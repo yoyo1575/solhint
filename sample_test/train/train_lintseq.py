@@ -3,15 +3,14 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
+    TrainingArguments, # 稳定版建议使用这个
 )
 from peft import LoraConfig, TaskType
 from trl import SFTTrainer
-# 注意：0.8.6 版本中建议直接使用 TrainingArguments 或专门的 SFTConfig
 from transformers import DataCollatorForLanguageModeling
 import numpy as np
 
-# 自定义 DataCollator
+# 自定义 DataCollator (逻辑保持不变)
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(self, response_template, tokenizer, mlm=False):
         super().__init__(tokenizer=tokenizer, mlm=mlm)
@@ -66,11 +65,11 @@ def main():
             output_texts.append(text)
         return output_texts
 
-    print("Loading model...")
+    print("Loading model (Optimized for 5090D)...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa", 
+        attn_implementation="sdpa", # 5090D 完美支持
         device_map="auto",
         trust_remote_code=True
     )
@@ -84,7 +83,7 @@ def main():
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    # 稳定版中使用 TrainingArguments 即可
+    # 稳定版中使用标准的 TrainingArguments
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
@@ -93,7 +92,9 @@ def main():
         num_train_epochs=NUM_EPOCHS,
         bf16=True,
         logging_steps=10,
-        save_strategy="no",
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=2,
         optim="adamw_torch",
         gradient_checkpointing=True,
         report_to="none",
@@ -102,7 +103,7 @@ def main():
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
 
-    # 在 0.8.6 稳定版中，max_seq_length 直接传给 Trainer
+    # 在 0.8.6 版本中，max_seq_length 是 SFTTrainer 的核心参数
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
@@ -116,8 +117,10 @@ def main():
     print("Starting training...")
     trainer.train()
 
+    # 保存模型
     trainer.model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
 if __name__ == "__main__":
     main()
+    #1
