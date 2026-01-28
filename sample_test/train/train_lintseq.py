@@ -111,3 +111,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+#2
+#pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
