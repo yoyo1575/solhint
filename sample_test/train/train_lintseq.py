@@ -3,13 +3,15 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    TrainingArguments,
 )
 from peft import LoraConfig, TaskType
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer
+# 注意：0.8.6 版本中建议直接使用 TrainingArguments 或专门的 SFTConfig
 from transformers import DataCollatorForLanguageModeling
 import numpy as np
 
-# 自定义 DataCollator 保持不变
+# 自定义 DataCollator
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(self, response_template, tokenizer, mlm=False):
         super().__init__(tokenizer=tokenizer, mlm=mlm)
@@ -33,11 +35,12 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         batch["labels"] = labels
         return batch
 
-# 配置参数
+# 路径配置
 MODEL_ID = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 DATA_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/data/train_lintseq.jsonl"
 OUTPUT_DIR = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/lora/solidity_lintseq"
 
+# 训练超参
 MAX_SEQ_LENGTH = 2048
 BATCH_SIZE = 8
 GRAD_ACCUMULATION = 2
@@ -45,7 +48,7 @@ LEARNING_RATE = 2e-4
 NUM_EPOCHS = 3
 
 def main():
-    print(f"Loading data from {DATA_PATH}...")
+    print(f"Loading data...")
     dataset = load_dataset("json", data_files=DATA_PATH, split="train")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -63,11 +66,11 @@ def main():
             output_texts.append(text)
         return output_texts
 
-    print("Loading model")
+    print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa", # 5090D 建议使用 sdpa 或 flash_attention_2
+        attn_implementation="sdpa", 
         device_map="auto",
         trust_remote_code=True
     )
@@ -81,8 +84,8 @@ def main():
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
 
-    # 在 dev 版本中，尽量精简 Config
-    training_args = SFTConfig(
+    # 稳定版中使用 TrainingArguments 即可
+    training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUMULATION,
@@ -90,17 +93,16 @@ def main():
         num_train_epochs=NUM_EPOCHS,
         bf16=True,
         logging_steps=10,
-        save_strategy="no", # 调试时建议先不保存
+        save_strategy="no",
         optim="adamw_torch",
         gradient_checkpointing=True,
         report_to="none",
-        # 如果 SFTConfig 还是报错，请注释掉下面这一行
-        max_seq_length=MAX_SEQ_LENGTH 
     )
 
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(response_template, tokenizer=tokenizer)
 
+    # 在 0.8.6 稳定版中，max_seq_length 直接传给 Trainer
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
@@ -108,14 +110,10 @@ def main():
         formatting_func=formatting_prompts_func,
         data_collator=collator,
         args=training_args,
-        # 在某些 trl 版本中，max_seq_length 必须在这里
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_kwargs={
-            "add_special_tokens": False,
-        }
     )
 
-    print("Starting training")
+    print("Starting training...")
     trainer.train()
 
     trainer.model.save_pretrained(OUTPUT_DIR)
