@@ -8,23 +8,21 @@ from transformers import (
 from peft import LoraConfig, TaskType
 from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
-# ==================== 核心配置区域 ====================
-# 模型路径 (推荐 Qwen2.5-Coder，完美支持 Solidity)
-MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
+MODEL_ID = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 
 # 数据路径
-DATA_PATH = "train_dataset.jsonl"
+DATA_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/data/train_lintseq.jsonl"
 
 # 输出目录
-OUTPUT_DIR = "./qwen_solidity_sft_5090"
+OUTPUT_DIR = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/lora/solidity_lintseq"
 
 # 显卡优化参数 (针对 5090D)
-MAX_SEQ_LENGTH = 2048   # Solidity 代码较长，建议 2048 或 4096
-BATCH_SIZE = 8          # 单卡 BS，显存如果够大可以尝试改到 16
-GRAD_ACCUMULATION = 2   # 梯度累积，等效 Batch Size = 8 * 2 = 16
-LEARNING_RATE = 2e-4    # LoRA 经典学习率
-NUM_EPOCHS = 3          # 训练轮数
-# ====================================================
+MAX_SEQ_LENGTH = 2048  # Solidity 代码较长，建议 2048 或 4096
+BATCH_SIZE = 8  # 单卡 BS，显存如果够大可以尝试改到 16
+GRAD_ACCUMULATION = 2  # 梯度累积，等效 Batch Size = 8 * 2 = 16
+LEARNING_RATE = 2e-4  # LoRA 经典学习率
+NUM_EPOCHS = 3  # 训练轮数
+
 
 def main():
     # 1. 加载数据集
@@ -33,9 +31,9 @@ def main():
 
     # 2. 加载 Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token 
+    tokenizer.pad_token = tokenizer.eos_token
 
-    # 3. 定义数据格式化函数 (适配你的 instruction/input/output 格式)
+    # 3. 定义数据格式化函数
     def formatting_prompts_func(example):
         output_texts = []
         for i in range(len(example['instruction'])):
@@ -54,7 +52,7 @@ def main():
                 {"role": "user", "content": user_content},
                 {"role": "assistant", "content": output}
             ]
-            
+
             # 自动添加 <|im_start|> 等 token
             text = tokenizer.apply_chat_template(messages, tokenize=False)
             output_texts.append(text)
@@ -64,20 +62,20 @@ def main():
     print("Loading model with BF16 and Flash Attention 2...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.bfloat16,        # 5090D 必须用 BF16
-        attn_implementation="flash_attention_2", # 物理外挂加速
+        torch_dtype=torch.bfloat16,  # 用 BF16
+        attn_implementation="flash_attention_2",
         device_map="auto",
         trust_remote_code=True
     )
 
     # 5. LoRA 配置
     peft_config = LoraConfig(
-        r=64,             # LoRA 秩，大一点效果好
-        lora_alpha=128,   # alpha 通常是 r 的 2 倍
+        r=64,  # LoRA 秩，大一点效果好
+        lora_alpha=128,  # alpha 通常是 r 的 2 倍
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] # 全模块微调
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]  # 全模块微调
     )
 
     # 6. 训练参数设置
@@ -87,13 +85,17 @@ def main():
         gradient_accumulation_steps=GRAD_ACCUMULATION,
         learning_rate=LEARNING_RATE,
         num_train_epochs=NUM_EPOCHS,
-        bf16=True,              # 开启 BF16
-        fp16=False,             # 关闭 FP16
-        logging_steps=10,       # 每10步打印一次日志
-        save_strategy="epoch",  # 每轮保存一次
+        bf16=True,  # 开启 BF16
+        fp16=False,  # 关闭 FP16
+        logging_steps=100,  # 每10步打印一次日志
+
+        save_strategy="steps",  # 每轮保存一次
+        sava_steps=1000,
+        sava_total_limit=3,
+        
         optim="adamw_torch",
-        report_to="none",       # 不上传 wandb
-        gradient_checkpointing=True, # 显存优化技术，开启后可以跑更大的 Batch
+        report_to="none",  # 不上传 wandb
+        gradient_checkpointing=True,  # 显存优化技术，开启后可以跑更大的 Batch
         dataloader_num_workers=4,
     )
 
@@ -121,6 +123,7 @@ def main():
     print(f"✅ Training finished. Saving model to {OUTPUT_DIR}")
     trainer.model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
+
 
 if __name__ == "__main__":
     main()
