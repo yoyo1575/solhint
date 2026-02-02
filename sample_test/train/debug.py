@@ -1,31 +1,85 @@
-import os
-import trl
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
-# 1. 找到 trl 安装在哪
-trl_path = os.path.dirname(trl.__file__)
-print(f"🔍 TRL 安装路径: {trl_path}")
+# ================= 配置路径 =================
+BASE_MODEL_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/models/Qwen2.5-Coder-7B-Instruct"
 
-# 2. 遍历所有文件，查找 DataCollatorForCompletionOnlyLM
-print("🚀 开始全盘搜索...")
-found = False
-for root, dirs, files in os.walk(trl_path):
-    for file in files:
-        if file.endswith(".py"):
-            file_path = os.path.join(root, file)
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    if "class DataCollatorForCompletionOnlyLM" in content:
-                        print(f"\n✅ 找到了！")
-                        print(f"📄 文件位置: {file_path}")
-                        
-                        # 计算导入路径
-                        rel_path = os.path.relpath(file_path, os.path.dirname(trl_path))
-                        import_path = rel_path.replace("/", ".").replace(".py", "")
-                        print(f"💡 你应该这样导入: from {import_path} import DataCollatorForCompletionOnlyLM")
-                        found = True
-            except:
-                pass
+# 2. 刚刚训练好的 LoRA 权重路径
+LORA_PATH = "/home/mac/PycharmProjects/PythonProject/yoyo/solhint/lora/solidity_lintseq"
 
-if not found:
-    print("\n❌ 完蛋，文件里真没有这个类。说明你的安装包是残缺的。")
+# ===========================================
+
+def main():
+    print("🚀 正在加载基座模型...")
+    # 1. 加载 Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH, trust_remote_code=True)
+    
+    # 2. 加载基座模型 (使用 BF16 和 SDPA 加速)
+    base_model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_PATH,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="sdpa", # 推理时也可以用 sdpa 加速
+        trust_remote_code=True
+    )
+
+    print(f"🔗 正在挂载 LoRA 权重: {LORA_PATH} ...")
+    # 3. 加载并合并 LoRA 权重
+    # 这步操作不会修改硬盘上的文件，只是在显存里把 LoRA 贴上去
+    model = PeftModel.from_pretrained(base_model, LORA_PATH)
+    
+    # 切换到评估模式
+    model.eval()
+    print("✅ 模型加载完毕，准备生成！")
+
+    # ================= 测试案例 =================
+    
+    # 这里写一个你想测试的 Prompt
+    # 注意：这里的 Instruction 风格要和你训练集里的保持一致
+    instruction = "Create a standard ERC20 token contract named 'MyToken' with symbol 'MTK'."
+    input_text = "" # 如果有 input 就填，没有留空
+
+    # 4. 构造对话格式 (ChatML)
+    if input_text:
+        content = f"{instruction}\n\nInput:\n{input_text}"
+    else:
+        content = instruction
+
+    messages = [
+        {"role": "user", "content": content}
+    ]
+    
+    # 应用模板
+    text = tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+
+    # 5. 编码输入
+    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+    # 6. 生成代码
+    print("\n正在生成回复...\n" + "="*50)
+    
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **model_inputs,
+            max_new_tokens=1024,   # 生成的最大长度
+            temperature=0.2,       # 温度低
+            top_p=0.9,
+            do_sample=True
+        )
+
+    # 7. 解码输出 (去掉输入的 Prompt 部分，只看新生成的)
+    generated_ids = [
+        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    print(response)
+    print("="*50)
+
+if __name__ == "__main__":
+    main()
