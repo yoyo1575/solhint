@@ -1,0 +1,11 @@
+# 1. Python 库
+pip install py-solc-x slither-analyzer datasets tqdm
+
+# 2. 安装 Foundry (用于测 Pass@1)
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# 3. 初始化一个 Foundry 项目 
+# 在当前目录下执行：
+forge init temp_test_env --force
+rm temp_test_env/src/* temp_test_env/test/*
